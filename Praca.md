@@ -196,6 +196,82 @@ subscribe('lorawan/trackers/event123/#')
 ✓ lorawan/trackers/event123/config/update
 ✓ lorawan/trackers/event123/stats/active-devices
 
+--- 
 
+GPS komplikácie 
+pri frekvencií 1.5 GHz tu blokuje i sklo stena strom 
+sklo okna blokuje GPS signál minimálne o 50 - 80 percent 
+budova odráža signal 
+satelity musia mať priamy výhľad 
+gps anténa je smerovaná dole 
+cold start trv=a dlho 
+Signál je výborny RSSI: -42 dBm, SNR: 13.5 dB
+GPS scan time bol príliš krátky - 60s nestačilo tak som ho rozšíril v configu appky na 120 
 
+Battery: 50%
+Firmware: 2.5
+Hardware: 1.6
+Work Mode: 1 (Periodic Mode) ✅
+Positioning Strategy: 0 (GPS Only) ✅
+Heartbeat Interval: 720 min
+Periodic Interval: 5 min ✅
+Event Interval: 60 min
+
+"errMessage": "FAILED TO OBTAIN THE UTC TIMESTAMP"
+
+Tracker odosiela 2 typy správ cez fPort 5 
+správa bez gps - heartbeat 
+
+{
+  "Battery": 49%,
+  "Firmware": "2.5",
+  "Work Mode": 1,
+  ...
+}
   
+GPS správa (s pozíciou)
+
+{
+  "Latitude": 49.821644,
+  "Longitude": 18.161606,
+  "Battery": 52%,
+  "timestamp": ...
+}
+
+1. Tracker (T-1000-B)
+   ↓ [LoRaWAN OTAA, 868 MHz]
+   
+2. WisGate Edge Pro (LoRaWAN Gateway)
+   ↓ [4G/LTE → Internet]
+   ↓ [MQTT publish na port 8883/TLS]
+   
+3. MQTT Broker (mqtt.hedurio.com)
+   ↓ [Topic: application/SENSECAP/#]
+   
+4. Backend (Python Flask + Flask-SocketIO)
+   ├─ MQTT Client (subscribe)
+   │  ↓ Príjme správu
+   │  ↓ Dekóduje Base64 → JSON
+   │  ↓ Parse GPS súradnice (lat, lon)
+   │  ↓ Uloží do PostgreSQL
+   │  ↓
+   ├─ WebSocket Server (Flask-SocketIO)
+   │  ↓ Broadcast 'tracker-update' event
+   │  ↓
+   └─ REST API
+      ├─ GET /api/trackers
+      ├─ GET /api/tracker/:id
+      └─ GET /api/tracker/:id/history
+   
+5. Frontend (React + Leaflet.js)
+   ├─ WebSocket Client (Socket.IO-client)
+   │  ↓ Počúva 'tracker-update' event
+   │  ↓ Aktualizuje state
+   │  ↓
+   ├─ Mapa (Leaflet.js)
+   │  ↓ Vykresli markery
+   │  ↓ Real-time update pozícií
+   │  ↓
+   └─ Timeline Slider
+      ↓ HTTP GET /api/tracker/:id/history?from=X&to=Y
+      ↓ Zobrazí historické pozície
