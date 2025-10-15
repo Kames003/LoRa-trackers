@@ -275,3 +275,105 @@ GPS správa (s pozíciou)
    └─ Timeline Slider
       ↓ HTTP GET /api/tracker/:id/history?from=X&to=Y
       ↓ Zobrazí historické pozície
+
+
+OTAA pri štate kazdeho join requestu sa vygeneruju dva zakladne seshion kluče - network session key - network session key - NwkSkey a application session key AppsKey 
+
+1. vychodiskove parametre v zariadeni ED - End Device napr, čo je v našom trackery 
+
+DevEUI - 64 bit unikatne ID zariadenia 
+JoinEUI - AppEUI - 64 bitove ID aplikacie 
+AppKey  - 128 bitovy root kluč - musi ostat v sieti a v zariadeni v tajnosti 
+
+Join request 
+
+z End device na network server 
+
+tracker vygeneruje 16 bitovy devNonce - je to nahodne čislo zamedzi replay utokom 
++ do join requestu ramca zapíše : JoinEUI, DevEUI, DevNonce + počíta CRC - MIC 
+
+toto pošle do gateway -- network server 
+
+ak je join request validny 
+
+do join accept ramca zabali JoinNonce, DevAddr, DLSettings --> Aktorý je následne ES-ENCRYPTovaný kľúčom AppKey:
+
+ED ho prijme, decryptuje (rovnaký AppKey) a prečíta JoinNonce, DevAddr atď.
+
+účel klučov 
+
+NwkSKey : 
+
+overovanie a ochranu mac vrsty 
+signuje / vypočítava všetky uplink aj downlink správy 
+šifruje a dešifruje len sieťove príkazy (FOpts) alebo payload, ak FPort=0
+
+
+Application session key 
+
+výhradne na end to end šifrovanie aplikačných dat 
+zašifruje frmpayload pri FPort greater than 1 na uplinku aj downlinku 
+• Sieť (NS) iba preposiela zašifrované dáta aplikačnému serveru, ten ich dešifruje pomocou AppSKey
+
+mosquitto_sub -h mqtt.hedurio.com -u hedurio -P qn3nyMYUPHTiigLrV94JRiAUXauE9F -t 'application/#' -v -p 8883
+
+prikaz otvorí MQTT‐subscriber na heduriackom brokri a vypíše ti do terminálu všetko, čo sa na témy matching „application/#“ objaví. Inými slovami:
+
+mosquitto_sub – spúšťa MQTT klienta v móde „subscribe“
+-h mqtt.hedurio.com – hostname brokeru
+-p 8883 – port (8883 je štandardne TLS/SSL)
+-u hedurio – užívateľské meno
+-P qn3nyMYUPHTiigLrV94JRiAUXauE9F – heslo
+-t 'application/#' – wildcard téma, odchyť všetko pod „application/…“
+-v – verbose, tzn. vypíšeš nielen payload, ale aj názov témy
+
+Výsledok: v reálnom čase uvidíš v termináli každú správu (téma + payload), ktorú ti brána pošle na heduriacky MQTT broker. Príkaz nič neukladá ani nepresmerováva ďalej – slúži len na odpočúvanie (debug/monitoring). Pre produkciu/parsovanie si potom vytvoríš vlastného subscriber-clienta (napr. v Node.js, Pythone...) a správy po odchytení uložíš či odošleš do DS.
+
+# Ako vyzerá mqqt arch ? 
+
+broker 
+
+– centrálny server, ktorý prijíma od publisherov správy a doručuje ich subscriberom
+– stará sa o smerovanie („routing“) podľa topic‐reťazca, QoS, udržiavanie stavov session, TTL, LWT atď.
+
+Publisher (vydavateľ)
+– akýkoľvek „klient“ (senzor, aplikácia…), ktorý dokáže správy (payload) odoslať na broker
+– pri odoslaní definuje:
+• topic (napr. sensors/temperature/room1)
+• QoS (0, 1 alebo 2 – garancia doručenia)
+• retained flag (či broker má túto správu ponechať ako „poslednú platnú“)
+
+Subscriber (odoberateľ)
+– klient, ktorý sa prihlási k jednému alebo viacerým topic-filterom (napr. sensors/# alebo actuators/+/set)
+– broker mu následne doručuje každú publikovanú správu, ktorá sa zhoduje s ľubovoľným jeho filterom
+– pri prihlásení si tiež môže určiť požadovaný QoS úroveň
+
+
+Našim „publisherom“ sú IoT trackery na end‐device (LoRa senzory).
+Trackery zašlú uplink cez LoRaWAN bránu do Hedurio network servera, ktorý vystavuje MQTT broker.
+Trackery publikujú napr. na topic
+application/123/device/456/uplink
+s QoS=1, payloadom JSONu: {… GPS, timestamp …}.
+My (backend/subscriber) sa prihlásime k topic-filtru
+application/123/+/uplink
+alebo jednoducho
+application/#
+a broker nám začne posielať všetky uplinky zo všetkých device‐id pod application/123.
+Backend dokáže spracovať doručené správy (parsovať JSON, ukladať do db, posielať notifikácie…).
+
+Dôležité vlastnosti MQTT:
+
+– Hierarchický názov topicu rozdelený lomítkami
+– Wildcardy: „+“ (jedna úroveň), „#“ (viac úrovní)
+– QoS 0,1,2 pre riadenie spoľahlivosti
+– Retained správy pre uchovávanie poslednej hodnoty
+– Clean vs. persistent sessions (uloženie nevyzdvihnutých správ pri odpojení)
+– Šifrovanie/TLS, autentifikácia (užívateľ/heslo, certifikáty)
+
+– Senzor = publisher → broker
+– Broker = Hedurio MQTT server → distribúcia podľa topic
+– Backend/appka/aktory = subscriber (alebo aj publisher downlinku) → spracovanie či odoslanie príkazov
+
+
+
+
