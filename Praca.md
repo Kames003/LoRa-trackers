@@ -374,6 +374,363 @@ Dôležité vlastnosti MQTT:
 – Broker = Hedurio MQTT server → distribúcia podľa topic
 – Backend/appka/aktory = subscriber (alebo aj publisher downlinku) → spracovanie či odoslanie príkazov
 
+GeoFences je z PostGIS = virtuálna geografická zóna 
+
+Príklad: Hudobný festival
+┌─────────────────────┐
+│   FESTIVAL AREA     │  ← Geofence (polygon)
+│                     │
+│  🎵 Stage          │
+│  🍺 Bar            │
+│  🚻 WC             │
+│                     │
+│  👤 Tracker1 INSIDE │  ✅ OK
+└─────────────────────┘
+         👤 Tracker2 OUTSIDE  ⚠️ ALERT!
+
+Alert keď niekto:
+
+Opustí povolenú zónu (dieťa sa stratilo)
+Vstúpi do zakázanej zóny (VIP area bez prístupu)
+Prejde do nebezpečnej zóny (backstage, strojovňa)
+
+Napr. 
+
+Festival ma 3sceny ( Stage A,B,C )
+- Dashboard zobrazí: "Stage A: 245 ľudí, Stage B: 189 ľudí..."
+Heatmapy a štatistiky 
+time based geofencing 
 
 
+vytvorenie geofence okolo podia 
+- alert ked niekto opusti zónu 
+detekcia kto je vo vnútri geofence 
+detekcia kto prave opustil geofence 
 
+ Continuous Aggregates
+
+❌ Ak máte < 10,000 záznamov  
+❌ Ak dashboard refreshujú len 1-2 ľudia občas  
+❌ Ak nepotrebujete agregácie (stačí len "kde je tracker práve teraz")
+ 
+**Pre váš projekt:**
+- **Zatiaľ nepotrebujete** - máte `latest_positions` view
+- Pridáte neskôr ak budete robiť: "Štatistiky pohybu za posledných 30 dní"
+
+---
+
+## 3️⃣ Trackovanie dlhšej trasy - čo tým myslím?
+
+Áno! **PostGIS LINESTRING** = spojenie bodov do čiary (trasa pohybu)
+
+### **Čo je to?**
+```
+GPS pozície (POINT):
+  👤 → 👤 → 👤 → 👤 → 👤
+
+Trasa (LINESTRING):
+  👤━━━👤━━━👤━━━👤━━━👤
+  ╰────────────────────╯
+      Jedna línia!
+```
+
+
+Príklad hodne cool 
+
+```cpp
+
+-- Získaj trasu trackera za posledných 6 hodín
+SELECT 
+    device_id,
+    ST_AsGeoJSON(
+        ST_MakeLine(location::geometry ORDER BY timestamp)
+    )::json AS trail_geojson,
+    MIN(timestamp) AS start_time,
+    MAX(timestamp) AS end_time,
+    COUNT(*) AS point_count
+FROM positions
+WHERE device_id = 'TestingTracker2'
+  AND timestamp > NOW() - INTERVAL '6 hours'
+GROUP BY device_id;
+
+```
+
+Output
+
+{
+  "type": "LineString",
+  "coordinates": [
+    [18.1614, 49.8216],
+    [18.1618, 49.8215],
+    [18.1622, 49.8214],
+    [18.1625, 49.8212]
+  ]
+}
+
+frontend 
+// Vykreslenie trasy na mape
+L.geoJSON(trail_geojson, {
+    style: { color: '#FF0000', weight: 3 }
+}).addTo(map);
+```
+
+Výsledok:
+```
+Mapa:
+┌─────────────────────────┐
+│                         │
+│      🗺️                 │
+│       ╱                 │
+│      ╱  Trasa trackera │
+│     ╱   (červená čiara)│
+│    👤 ← aktuálna pozícia│
+│                         │
+└─────────────────────────┘
+
+
+Analýza pohybu
+
+Celková vzdialenosť prejdená za deň:
+
+WITH trail AS (
+    SELECT ST_MakeLine(location::geometry ORDER BY timestamp) AS line
+    FROM positions
+    WHERE device_id = 'TestingTracker2'
+      AND timestamp::date = CURRENT_DATE
+)
+SELECT 
+    ST_Length(line::geography) / 1000.0 AS distance_km
+FROM trail;
+
+priemerná rýchlost 
+
+WITH movement AS (
+    SELECT 
+        timestamp,
+        location,
+        LAG(location::geometry) OVER (ORDER BY timestamp) AS prev_location,
+        LAG(timestamp) OVER (ORDER BY timestamp) AS prev_time
+    FROM positions
+    WHERE device_id = 'TestingTracker2'
+      AND timestamp > NOW() - INTERVAL '1 hour'
+)
+SELECT 
+    AVG(
+        ST_Distance(location::geometry, prev_location::geography) /  -- metre
+        EXTRACT(EPOCH FROM (timestamp - prev_time)) * 3.6  -- km/h konverzia
+    ) AS avg_speed_kmh,
+    MAX(
+        ST_Distance(location::geometry, prev_location::geography) /
+        EXTRACT(EPOCH FROM (timestamp - prev_time)) * 3.6
+    ) AS max_speed_kmh
+FROM movement
+WHERE prev_location IS NOT NULL;
+```
+
+**Output:**
+```
+avg_speed_kmh: 4.2 km/h  (prechodzka)
+max_speed_kmh: 8.5 km/h  (rýchla chôdza)
+
+kde stál tracker dlhšie než 5 minut 
+
+
+WITH stationary_points AS (
+    SELECT 
+        timestamp,
+        location,
+        LAG(location::geometry) OVER (ORDER BY timestamp) AS prev_location,
+        timestamp - LAG(timestamp) OVER (ORDER BY timestamp) AS time_diff
+    FROM positions
+    WHERE device_id = 'TestingTracker2'
+      AND timestamp::date = CURRENT_DATE
+)
+SELECT 
+    timestamp,
+    ST_AsText(location::geometry) AS position,
+    time_diff
+FROM stationary_points
+WHERE prev_location IS NOT NULL
+  AND ST_Distance(location::geometry, prev_location::geography) < 50  -- < 50m pohyb
+  AND time_diff > INTERVAL '5 minutes'
+ORDER BY timestamp;
+```
+
+**Output:**
+```
+timestamp            | position                  | time_diff
+---------------------|---------------------------|----------
+2025-10-22 09:30:00  | POINT(18.1614 49.8216)   | 00:12:00
+2025-10-22 14:15:00  | POINT(18.1625 49.8212)   | 00:08:30
+```
+
+→ "Tracker stál pri súradniciach X,Y na 12 minút" (napr. obed, pauza)
+
+---
+
+#### **C) Timeline s trasou (váš use-case!)**
+```
+Timeline slider:
+[=====|=============]
+      ↑
+  08:00-12:00
+
+Mapa zobrazuje:
+- Aktuálne pozície (všetky trackery)
+- Trasa vybraného trackera (08:00-12:00) jako červená čiara
+
+
+Heat Maps 
+Upozorniť ked sa dve osoby priblížia 
+movements patterns ( analýza vzorcov pohybu ) 
+movement patterns - Benefit: "90% ľudí ide z hlavného vchodu cez Bar k Stage A" → optimalizácia infraštruktúry!
+speed zones - detekcia abnormalnej rýchlosti - Alert keď niekto beží (možný incident/panika)
+Dwell time analysis - čas strávený na mieste - kolko ludia stravia času na mieste - pri food trucku ludia stoja primerne 8 minut -- pridaj ďalši truck
+lost person detection - ziskaj poslednu znamu poziciu a priemernu rýchlost/smer - vypočítaj pravdepodobnú poziciu - následne zobraz search area na mape a napr alert nejbliýší stufftracker 
+
+
+Čo sa týka TimescaleDB - minutové štatistiky ( pre lives dashboards ), auto refresh policy každých 30 sekund o výsledku dashborad querry bude super fast 
+
+compression 
+- automatická kompresia starých dát 
+dáta staršie ako 7 dni --> komprimované čo nam da usportu miesta radovo o 90 percent 
+nasledne dáta staršie ako napr 30 dni vymazať 
+DOWNSAMPLING = po 30 dnoch, zmaž detailne data, ponechat len hodinove agregácie 
+timesclaedb automaticky vytvára chunks 
+
+# Podstatné príkazy pre Docker compose 
+
+# ✅ SPUSTIŤ kontajnery (používa existujúce images)
+docker compose up -d
+
+# ✅ ZASTAVIŤ kontajnery (nepouštia, data zostávajú)
+docker compose stop
+
+# ✅ ZNOVA SPUSTIŤ zastavené kontajnery
+docker compose start
+
+# ✅ REŠTARTOVAŤ bežiace kontajnery
+docker compose restart
+
+# ✅ ZASTAVIŤ A ODSTRÁNIŤ kontajnery (data v volumes ZOSTÁVAJÚ!)
+docker compose down
+
+# ⚠️ ZASTAVIŤ, ODSTRÁNIŤ kontajnery A VOLUMES (VYMAŽE DATA!)
+docker compose down -v
+
+Čo pouzívať : 
+
+Prvé spustenie : docker compose up -d 
+zastaviť dočasne : docker compose stop 
+znova spustit : docker compose start 
+reštart po zmene kodu : docker compose restart 
+zastavit a odstranit kontajnery : docker compose down 
+vyčistit všetko vrátane dát : docker compose down -v 
+
+
+# Sledovať logy databázy
+docker-compose logs -f timescaledb
+
+# Sledovať logy všetkých služieb
+docker-compose logs -f
+
+# Status kontajnerov
+docker-compose ps
+
+# Zobraziť resources (CPU, RAM)
+docker stats
+
+
+# Vyčistiť staré/nepoužívané images
+docker image prune -a
+
+# Vyčistiť všetko nepoužívané (images, volumes, networks)
+docker system prune -a --volumes
+
+# Zobraziť veľkosť volumes
+docker system df
+
+
+docker exec -it tracker-db psql -U tracker_user -d tracker_db = priamo sa pripojiť na ds 
+
+SELECT * FROM devices;
+
+REFRESH MATERIALIZED VIEW
+SELECT * FROM latest_positions;
+
+\q 
+
+Testoavanie databázy : 
+
+REFRESH MATERIALIZED VIEW latest_positions;
+
+2. Aktuálne pozície:
+
+SELECT * FROM latest_positions;
+
+3. Vzdialenosť od centra Bílovce:
+
+SELECT 
+    lp.device_id,
+    d.device_name,
+    lp.latitude,
+    lp.longitude,
+    ST_Distance(
+        lp.location,
+        ST_SetSRID(ST_MakePoint(18.0155, 49.7564), 4326)::geography
+    ) / 1000.0 AS distance_km
+FROM latest_positions lp
+JOIN devices d ON lp.device_id = d.device_id;
+
+Trasa trackera (LINESTRING)
+
+SELECT 
+    device_id,
+    ST_AsText(ST_MakeLine(location::geometry ORDER BY timestamp)) AS trail_linestring,
+    COUNT(*) AS point_count,
+    MIN(timestamp) AS start_time,
+    MAX(timestamp) AS end_time
+FROM positions
+WHERE device_id = '2cf7f1c05300063d'
+GROUP BY device_id;
+
+Vzdialenosť medzi po sebe idúcimi pozíciami:
+
+WITH position_changes AS (
+    SELECT 
+        id,
+        timestamp,
+        location,
+        LAG(location) OVER (ORDER BY timestamp) AS prev_location
+    FROM positions
+    WHERE device_id = '2cf7f1c05300063d'
+)
+SELECT 
+    id,
+    timestamp,
+    ST_Distance(location, prev_location) AS distance_meters,
+    EXTRACT(EPOCH FROM (timestamp - LAG(timestamp) OVER (ORDER BY timestamp))) AS time_diff_seconds
+FROM position_changes
+WHERE prev_location IS NOT NULL
+ORDER BY timestamp;
+
+ Database štatistiky:
+
+ SELECT 
+    'Devices' as table_name, COUNT(*) as count FROM devices
+UNION ALL
+SELECT 'Positions', COUNT(*) FROM positions
+UNION ALL
+SELECT 'Positions (24h)', COUNT(*) FROM positions WHERE timestamp > NOW() - INTERVAL '24 hours';
+
+TimescaleDB chunks:
+
+SELECT 
+    chunk_name,
+    range_start,
+    range_end,
+    pg_size_pretty(total_bytes) as size,
+    compression_status
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'positions'
+ORDER BY range_start DESC;
